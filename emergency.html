@@ -1,1150 +1,3 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import os
-import psycopg2
-import logging
-import json
-from typing import List, Optional
-from datetime import datetime
-
-app = FastAPI()
-
-# Configure logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
-
-# CORS configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Database connection
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://itech_l1q2_user:AoqQkrtzrQW7WEDOJdh0C6hhlY5Xe3sv@dpg-cuvnsbggph6c73ev87g0-a/itech_l1q2")
-
-def get_db():
-    conn = psycopg2.connect(DATABASE_URL)
-    return conn
-
-# Pydantic models
-class Product(BaseModel):
-    name: str
-    type: str
-    buying_price: float
-    selling_price: float
-
-class Service(BaseModel):
-    name: str
-    description: str
-    price: float
-
-class Stock(BaseModel):
-    product_name: str
-    product_type: str
-    quantity: int
-    price_per_unit: float
-
-class BankAccountUpdate(BaseModel):
-    balance: float
-    purpose: str
-
-class Client(BaseModel):
-    name: str
-    email: str
-    phone: str
-
-class Asset(BaseModel):
-    name: str
-    type: str
-    cost_price: float
-    current_value: float
-    quantity: int
-
-class SaleItem(BaseModel):
-    name: str
-    quantity: int
-    unit_price: float
-    total: float
-
-class Sale(BaseModel):
-    client_name: str
-    items: List[SaleItem]
-    total_amount: float
-
-# Initialize database tables
-def init_db():
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        # Drop and recreate tables to ensure the correct schema
-        cursor.execute('DROP TABLE IF EXISTS bank_account;')
-        cursor.execute('DROP TABLE IF EXISTS sales;')
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS products (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                type TEXT NOT NULL,
-                buying_price REAL NOT NULL,
-                selling_price REAL NOT NULL
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS services (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT NOT NULL,
-                price REAL NOT NULL
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS stock (
-                id SERIAL PRIMARY KEY,
-                product_name TEXT NOT NULL,
-                product_type TEXT NOT NULL,
-                quantity INTEGER NOT NULL,
-                price_per_unit REAL NOT NULL
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS bank_account (
-                id SERIAL PRIMARY KEY,
-                balance REAL NOT NULL
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS clients (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                email TEXT NOT NULL,
-                phone TEXT NOT NULL
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS assets (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                type TEXT NOT NULL,
-                cost_price REAL NOT NULL,
-                current_value REAL NOT NULL,
-                quantity INTEGER NOT NULL
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS sales (
-                id SERIAL PRIMARY KEY,
-                client_name TEXT NOT NULL,
-                items JSONB NOT NULL,
-                total_amount REAL NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        # Initialize the balance to 0 if the table is empty
-        cursor.execute('SELECT COUNT(*) FROM bank_account')
-        if cursor.fetchone()[0] == 0:
-            cursor.execute('INSERT INTO bank_account (balance) VALUES (0)')
-        conn.commit()
-    except Exception as e:
-        logger.error(f"Error initializing database: {e}")
-        if conn:
-            conn.rollback()
-        raise
-    finally:
-        if conn:
-            conn.close()
-
-# Initialize database
-init_db()
-
-# Product endpoints
-@app.post("/products/")
-def add_product(product: Product):
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        logger.debug(f"Adding product: {product}")
-        cursor.execute('''
-            INSERT INTO products (name, type, buying_price, selling_price)
-            VALUES (%s, %s, %s, %s)
-        ''', (
-            product.name, product.type, product.buying_price, product.selling_price
-        ))
-        conn.commit()
-        return {"message": "Product added successfully"}
-    except Exception as e:
-        logger.error(f"Error adding product: {e}")
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to add product: {str(e)}")
-    finally:
-        if conn:
-            conn.close()
-
-@app.get("/products/")
-def get_products():
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM products')
-        products = cursor.fetchall()
-        return {"products": [dict(zip([col[0] for col in cursor.description], row)) for row in products]}
-    except Exception as e:
-        logger.error(f"Error fetching products: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch products")
-    finally:
-        if conn:
-            conn.close()
-
-@app.delete("/products/{product_name}/{product_type}")
-def delete_product(product_name: str, product_type: str):
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM products WHERE name = %s AND type = %s', (product_name, product_type))
-        product = cursor.fetchone()
-        if not product:
-            raise HTTPException(status_code=404, detail="Product not found")
-
-        cursor.execute('DELETE FROM products WHERE name = %s AND type = %s', (product_name, product_type))
-        conn.commit()
-        return {"message": "Product deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting product: {e}")
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail="Failed to delete product")
-    finally:
-        if conn:
-            conn.close()
-
-# Stock endpoints
-@app.get("/total_stock/")
-def get_total_stock():
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT SUM(quantity * price_per_unit) FROM stock')
-        total_stock = cursor.fetchone()[0] or 0
-        return {"total_stock": total_stock}
-    except Exception as e:
-        logger.error(f"Error calculating total stock: {e}")
-        raise HTTPException(status_code=500, detail="Failed to calculate total stock")
-    finally:
-        if conn:
-            conn.close()
-
-@app.post("/stock/")
-def add_stock(stock: Stock):
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO stock (product_name, product_type, quantity, price_per_unit)
-            VALUES (%s, %s, %s, %s)
-        ''', (
-            stock.product_name, stock.product_type, stock.quantity, stock.price_per_unit
-        ))
-        conn.commit()
-        return {"message": "Stock added successfully"}
-    except Exception as e:
-        logger.error(f"Error adding stock: {e}")
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to add stock: {str(e)}")
-    finally:
-        if conn:
-            conn.close()
-
-@app.get("/stock/")
-def get_stock():
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM stock')
-        stock = cursor.fetchall()
-        return {"stock": [dict(zip([col[0] for col in cursor.description], row)) for row in stock]}
-    except Exception as e:
-        logger.error(f"Error fetching stock: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch stock")
-    finally:
-        if conn:
-            conn.close()
-
-@app.delete("/stock/{product_name}/{product_type}")
-def delete_stock(product_name: str, product_type: str):
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM stock WHERE product_name = %s AND product_type = %s', (product_name, product_type))
-        stock_item = cursor.fetchone()
-        if not stock_item:
-            raise HTTPException(status_code=404, detail="Stock item not found")
-
-        cursor.execute('DELETE FROM stock WHERE product_name = %s AND product_type = %s', (product_name, product_type))
-        conn.commit()
-        return {"message": "Stock item deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting stock item: {e}")
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail="Failed to delete stock item")
-    finally:
-        if conn:
-            conn.close()
-
-# Service endpoints
-@app.post("/services/")
-def add_service(service: Service):
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO services (name, description, price)
-            VALUES (%s, %s, %s)
-        ''', (service.name, service.description, service.price))
-        conn.commit()
-        return {"message": "Service added successfully"}
-    except Exception as e:
-        logger.error(f"Error adding service: {e}")
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail="Failed to add service")
-    finally:
-        if conn:
-            conn.close()
-
-@app.get("/services/")
-def get_services():
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM services')
-        services = cursor.fetchall()
-        return {"services": [dict(zip([col[0] for col in cursor.description], row)) for row in services]}
-    except Exception as e:
-        logger.error(f"Error fetching services: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch services")
-    finally:
-        if conn:
-            conn.close()
-
-@app.delete("/services/{service_name}")
-def delete_service(service_name: str):
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM services WHERE name = %s', (service_name,))
-        service = cursor.fetchone()
-        if not service:
-            raise HTTPException(status_code=404, detail="Service not found")
-
-        cursor.execute('DELETE FROM services WHERE name = %s', (service_name,))
-        conn.commit()
-        return {"message": "Service deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting service: {e}")
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail="Failed to delete service")
-    finally:
-        if conn:
-            conn.close()
-
-# Bank Account endpoints
-@app.get("/bank_account/")
-def get_bank_account():
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT balance FROM bank_account WHERE id = 1')
-        balance = cursor.fetchone()[0]
-        return {"balance": balance}
-    except Exception as e:
-        logger.error(f"Error fetching bank account balance: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch bank account balance")
-    finally:
-        if conn:
-            conn.close()
-
-@app.post("/bank_account/")
-def update_bank_account(bank_account: BankAccountUpdate):
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT balance FROM bank_account WHERE id = 1')
-        current_balance = cursor.fetchone()[0]
-        new_balance = current_balance + bank_account.balance
-        cursor.execute('UPDATE bank_account SET balance = %s WHERE id = 1', (new_balance,))
-        conn.commit()
-        return {"message": "Bank account balance updated successfully"}
-    except Exception as e:
-        logger.error(f"Error updating bank account balance: {e}")
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail="Failed to update bank account balance")
-    finally:
-        if conn:
-            conn.close()
-
-# Client endpoints
-@app.post("/clients/")
-def add_client(client: Client):
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO clients (name, email, phone)
-            VALUES (%s, %s, %s)
-        ''', (client.name, client.email, client.phone))
-        conn.commit()
-        return {"message": "Client added successfully"}
-    except Exception as e:
-        logger.error(f"Error adding client: {e}")
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail="Failed to add client")
-    finally:
-        if conn:
-            conn.close()
-
-@app.get("/clients/")
-def get_clients():
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM clients')
-        clients = cursor.fetchall()
-        return {"clients": [dict(zip([col[0] for col in cursor.description], row)) for row in clients]}
-    except Exception as e:
-        logger.error(f"Error fetching clients: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch clients")
-    finally:
-        if conn:
-            conn.close()
-
-@app.delete("/clients/{client_name}")
-def delete_client(client_name: str):
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM clients WHERE name = %s', (client_name,))
-        client = cursor.fetchone()
-        if not client:
-            raise HTTPException(status_code=404, detail="Client not found")
-
-        cursor.execute('DELETE FROM clients WHERE name = %s', (client_name,))
-        conn.commit()
-        return {"message": "Client deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting client: {e}")
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail="Failed to delete client")
-    finally:
-        if conn:
-            conn.close()
-
-# Asset endpoints
-@app.post("/assets/")
-def add_asset(asset: Asset):
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO assets (name, type, cost_price, current_value, quantity)
-            VALUES (%s, %s, %s, %s, %s)
-        ''', (asset.name, asset.type, asset.cost_price, asset.current_value, asset.quantity))
-        conn.commit()
-        return {"message": "Asset added successfully"}
-    except Exception as e:
-        logger.error(f"Error adding asset: {e}")
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to add asset: {str(e)}")
-    finally:
-        if conn:
-            conn.close()
-
-@app.get("/assets/")
-def get_assets():
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM assets')
-        assets = cursor.fetchall()
-        return {"assets": [dict(zip([col[0] for col in cursor.description], row)) for row in assets]}
-    except Exception as e:
-        logger.error(f"Error fetching assets: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch assets")
-    finally:
-        if conn:
-            conn.close()
-
-@app.delete("/assets/{asset_id}")
-def delete_asset(asset_id: int):
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM assets WHERE id = %s', (asset_id,))
-        asset = cursor.fetchone()
-        if not asset:
-            raise HTTPException(status_code=404, detail="Asset not found")
-
-        cursor.execute('DELETE FROM assets WHERE id = %s', (asset_id,))
-        conn.commit()
-        return {"message": "Asset deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting asset: {e}")
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail="Failed to delete asset")
-    finally:
-        if conn:
-            conn.close()
-
-# Total Investment endpoint
-@app.get("/total_investment/")
-def get_total_investment():
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-
-        # Get total investment from assets
-        cursor.execute('SELECT SUM(cost_price * quantity) FROM assets')
-        total_assets = cursor.fetchone()[0] or 0
-
-        # Get bank account balance
-        cursor.execute('SELECT balance FROM bank_account WHERE id = 1')
-        bank_balance = cursor.fetchone()[0] or 0
-
-        # Get total amount in stock
-        cursor.execute('SELECT SUM(quantity * price_per_unit) FROM stock')
-        total_stock = cursor.fetchone()[0] or 0
-
-        # Calculate total investment
-        total_investment = total_assets + bank_balance + total_stock
-
-        return {"total_investment": total_investment}
-    except Exception as e:
-        logger.error(f"Error calculating total investment: {e}")
-        raise HTTPException(status_code=500, detail="Failed to calculate total investment")
-    finally:
-        if conn:
-            conn.close()
-
-# Sales endpoints
-@app.post("/sales/")
-def create_sale(sale: Sale):
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-
-        # Insert the sale into the database
-        cursor.execute('''
-            INSERT INTO sales (client_name, items, total_amount)
-            VALUES (%s, %s, %s)
-        ''', (sale.client_name, json.dumps([item.dict() for item in sale.items]), sale.total_amount))
-
-        # Update the bank account balance
-        cursor.execute('SELECT balance FROM bank_account WHERE id = 1')
-        current_balance = cursor.fetchone()[0]
-        new_balance = current_balance + sale.total_amount
-        cursor.execute('UPDATE bank_account SET balance = %s WHERE id = 1', (new_balance,))
-
-        conn.commit()
-        return {"message": "Sale created and bank account updated successfully"}
-    except Exception as e:
-        logger.error(f"Error creating sale: {e}")
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to create sale: {str(e)}")
-    finally:
-        if conn:
-            conn.close()
-
-@app.get("/sales/")
-def get_sales():
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM sales ORDER BY created_at DESC')
-        sales = cursor.fetchall()
-        return {"sales": [dict(zip([col[0] for col in cursor.description], row)) for row in sales]}
-    except Exception as e:
-        logger.error(f"Error fetching sales: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch sales")
-    finally:
-        if conn:
-            conn.close()
-
-# Run the application
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000),
-
-
-    <!DOCTYPE html>
-<html lang="en">
-<head>
-  <style>
-    .overview {
-      font-size: 34px;
-      text-align: center;
-      background-color: rgb(19, 19, 71);
-      margin-bottom: 15px;
-      color: white;
-    }
-    .modal-overlay {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      background-color: rgba(0, 0, 0, 0.5);
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      z-index: 1000;
-    }
-    .modal-content {
-      background-color: white;
-      padding: 20px;
-      border-radius: 8px;
-      width: 90%;
-      max-width: 600px;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    }
-    .dark .modal-content {
-      background-color: #1f2937;
-      color: white;
-    }
-    .sale-table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 10px;
-    }
-    .sale-table th, .sale-table td {
-      padding: 10px;
-      border: 1px solid #ddd;
-      text-align: left;
-    }
-    .dark .sale-table th, .dark .sale-table td {
-      border-color: #374151;
-    }
-    .hidden {
-      display: none;
-    }
-    .gray-button {
-      background-color: #6b7280;
-      color: white;
-      padding: 10px 20px;
-      border-radius: 5px;
-      text-align: center;
-      display: inline-block;
-      width: auto;
-      margin: 5px;
-      border: 1px solid black;
-      box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.2);
-    }
-    .gray-button:hover {
-      background-color: #4b5563;
-    }
-    .close-button {
-      background-color: #ef4444;
-      color: white;
-      padding: 10px 20px;
-      border-radius: 5px;
-      text-align: center;
-      display: inline-block;
-      width: auto;
-      margin: 5px;
-      border: 1px solid black;
-      box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.2);
-    }
-    .close-button:hover {
-      background-color: #dc2626;
-    }
-    .flex-end {
-      display: flex;
-      justify-content: flex-end;
-    }
-    .editable-unit-price {
-      border: 1px solid #ddd;
-      padding: 5px;
-      border-radius: 4px;
-      width: 80px;
-    }
-    .sales-history-modal {
-      max-height: 80vh;
-      overflow-y: auto;
-    }
-    .sales-history-modal table {
-      width: 100%;
-      border-collapse: collapse;
-    }
-    .sales-history-modal th, .sales-history-modal td {
-      padding: 10px;
-      border: 1px solid #ddd;
-      text-align: left;
-    }
-    .sales-history-modal th {
-      background-color: #f3f4f6;
-    }
-    .dark .sales-history-modal th {
-      background-color: #374151;
-    }
-  </style>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Make a Sale - Ndyakurungi ITECH</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet">
-</head>
-<body class="bg-gray-100 dark:bg-gray-900">
-  <!-- Header -->
-  <header class="bg-white dark:bg-gray-800 shadow">
-    <div class="container mx-auto p-4 flex items-center justify-between">
-      <div class="flex items-center">
-        <div class="text-4xl text-blue-600 dark:text-blue-400 mr-4">
-          <img src="Itech-computers-logo1.webp" alt="Itech Computers Logo">
-        </div>
-        <div>
-          <h1 class="text-2xl font-bold dark:text-white">NDYAKURUNGI ITECH COMPUTER SOLUTIONS</h1>
-          <p class="text-sm text-gray-600 dark:text-gray-400">Name it, we will provide & deliver it</p>
-        </div>
-      </div>
-      <!-- Dark/Light Mode Toggle -->
-      <button id="themeToggle" class="p-2 rounded-full bg-gray-200 dark:bg-gray-700">
-        <i id="themeIcon" class="fas fa-moon text-gray-800 dark:text-yellow-400"></i>
-      </button>
-    </div>
-  </header>
-
-  <!-- Main Content -->
-  <div class="container mx-auto p-8">
-    <!-- Make a Sale Section -->
-    <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow mb-8">
-      <h2 class="text-xl font-semibold mb-4 dark:text-white"><i class="fas fa-cash-register mr-2"></i>Make a Sale</h2>
-      <!-- Buttons for Add Client and Choose Client -->
-      <div class="flex justify-between mb-4">
-        <button onclick="openChooseClientModal()" class="gray-button">
-          <i class="fas fa-users mr-2"></i>Choose Client
-        </button>
-        <button onclick="openAddClientModal()" class="gray-button">
-          <i class="fas fa-user-plus mr-2"></i>Add Client
-        </button>
-      </div>
-      <!-- Sale Table -->
-      <table class="sale-table">
-        <thead>
-          <tr>
-            <th>Item Name</th>
-            <th>Quantity</th>
-            <th>Unit Price</th>
-            <th>Total</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody id="saleTableBody">
-          <!-- Sale items will be dynamically added here -->
-        </tbody>
-      </table>
-      <!-- Add Item and Select Service Buttons -->
-      <div class="flex gap-2 mt-4">
-        <button onclick="openAddItemModal()" class="gray-button">
-          <i class="fas fa-plus mr-2"></i>Select Item
-        </button>
-        <button onclick="openSelectServiceModal()" class="gray-button">
-          <i class="fas fa-cogs mr-2"></i>Select Service
-        </button>
-      </div>
-      <!-- Total and Generate Receipt -->
-      <div class="flex justify-end items-center mt-4">
-        <p class="text-lg font-semibold dark:text-white mr-4">Total: <span id="saleTotal">0.00</span></p>
-        <button onclick="generateReceipt()" class="gray-button">
-          <i class="fas fa-receipt mr-2"></i>Generate Receipt
-        </button>
-      </div>
-    </div>
-
-    <!-- Sales History Section -->
-    <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
-      <h2 class="text-xl font-semibold mb-4 dark:text-white"><i class="fas fa-history mr-2"></i>Sales History</h2>
-      <!-- Search Sales History -->
-      <input type="text" id="searchSales" placeholder="Search sales..." class="w-full p-2 border rounded mb-4 dark:bg-gray-700 dark:text-white">
-      <!-- Sales History Table -->
-      <table class="sale-table">
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Client</th>
-            <th>Items</th>
-            <th>Total Amount</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody id="salesHistoryBody">
-          <!-- Sales history will be dynamically added here -->
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- Add Client Modal -->
-  <div id="addClientModal" class="modal-overlay hidden">
-    <div class="modal-content">
-      <h3 class="text-lg font-semibold mb-4 dark:text-white"><i class="fas fa-user-plus mr-2"></i>Add Client</h3>
-      <form id="addClientForm">
-        <input type="text" placeholder="Client Name" class="w-full p-2 border rounded mb-4 dark:bg-gray-700 dark:text-white" required>
-        <input type="text" placeholder="Client Email" class="w-full p-2 border rounded mb-4 dark:bg-gray-700 dark:text-white" required>
-        <input type="text" placeholder="Client Phone" class="w-full p-2 border rounded mb-4 dark:bg-gray-700 dark:text-white" required>
-        <button type="submit" class="gray-button">Add Client</button>
-      </form>
-      <button onclick="closeModal('addClientModal')" class="close-button mt-2">Close</button>
-    </div>
-  </div>
-
-  <!-- Choose Client Modal -->
-  <div id="chooseClientModal" class="modal-overlay hidden">
-    <div class="modal-content">
-      <h3 class="text-lg font-semibold mb-4 dark:text-white"><i class="fas fa-users mr-2"></i>Choose Client</h3>
-      <button onclick="openAddClientModal()" class="gray-button mb-4">
-        <i class="fas fa-user-plus mr-2"></i>Add New Client
-      </button>
-      <div id="clientList" class="mb-4">
-        <!-- Clients will be dynamically added here -->
-      </div>
-      <button onclick="closeModal('chooseClientModal')" class="close-button">Close</button>
-    </div>
-  </div>
-
-  <!-- Add Item Modal -->
-  <div id="addItemModal" class="modal-overlay hidden">
-    <div class="modal-content">
-      <h3 class="text-lg font-semibold mb-4 dark:text-white"><i class="fas fa-plus mr-2"></i>Add Item</h3>
-      <form id="addItemForm">
-        <select id="itemSelect" class="w-full p-2 border rounded mb-4 dark:bg-gray-700 dark:text-white" required>
-          <option value="" disabled selected>Select Item</option>
-          <!-- Items will be dynamically added here -->
-        </select>
-        <input type="number" placeholder="Quantity" id="itemQuantity" class="w-full p-2 border rounded mb-4 dark:bg-gray-700 dark:text-white" required>
-        <button type="submit" class="gray-button">Add Item</button>
-      </form>
-      <button onclick="closeModal('addItemModal')" class="close-button mt-2">Close</button>
-    </div>
-  </div>
-
-  <!-- Select Service Modal -->
-  <div id="selectServiceModal" class="modal-overlay hidden">
-    <div class="modal-content">
-      <h3 class="text-lg font-semibold mb-4 dark:text-white"><i class="fas fa-cogs mr-2"></i>Select Service</h3>
-      <form id="selectServiceForm">
-        <select id="serviceSelect" class="w-full p-2 border rounded mb-4 dark:bg-gray-700 dark:text-white" required>
-          <option value="" disabled selected>Select Service</option>
-          <!-- Services will be dynamically added here -->
-        </select>
-        <input type="number" placeholder="Quantity" id="serviceQuantity" class="w-full p-2 border rounded mb-4 dark:bg-gray-700 dark:text-white" required>
-        <button type="submit" class="gray-button">Add Service</button>
-      </form>
-      <button onclick="closeModal('selectServiceModal')" class="close-button mt-2">Close</button>
-    </div>
-  </div>
-
-  <!-- JavaScript -->
-  <script>
-    const { jsPDF } = window.jspdf;
-    const backendUrl = 'https://man-m681.onrender.com'; // Replace with your Render backend URL
-    let clients = [];
-    let salesHistory = [];
-    let currentSale = [];
-    let selectedClient = null;
-    let products = [];
-    let stockItems = [];
-
-    // Fetch Products and Stock from Backend
-    async function fetchProducts() {
-      const response = await fetch(`${backendUrl}/products/`);
-      const data = await response.json();
-      products = data.products;
-      populateItemSelect();
-    }
-
-    async function fetchStock() {
-      const response = await fetch(`${backendUrl}/stock/`);
-      const data = await response.json();
-      stockItems = data.stock;
-    }
-
-    // Populate Item Select Dropdown
-    function populateItemSelect() {
-      const itemSelect = document.getElementById('itemSelect');
-      itemSelect.innerHTML = '<option value="" disabled selected>Select Item</option>' +
-        products.map(product => `<option value="${product.name}" data-type="${product.type}">${product.name} (${product.type})</option>`).join('');
-    }
-
-    // Open Add Item Modal
-    function openAddItemModal() {
-      fetchProducts();
-      document.getElementById('addItemModal').classList.remove('hidden');
-    }
-
-    // Add Item to Sale
-    document.getElementById('addItemForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const itemName = document.getElementById('itemSelect').value;
-      const quantity = parseFloat(document.getElementById('itemQuantity').value);
-
-      // Fetch product details
-      const product = products.find(p => p.name === itemName);
-      if (!product) {
-        alert('Product not found!');
-        return;
-      }
-
-      // Fetch stock details
-      const stockItem = stockItems.find(item => item.product_name === itemName);
-      if (!stockItem || stockItem.quantity < quantity) {
-        alert('Insufficient stock!');
-        return;
-      }
-
-      const total = product.selling_price * quantity;
-      currentSale.push({ itemName, quantity, unitPrice: product.selling_price, total });
-      updateSaleTable();
-      closeModal('addItemModal');
-    });
-
-    // Update Sale Table
-    function updateSaleTable() {
-      const saleTableBody = document.getElementById('saleTableBody');
-      saleTableBody.innerHTML = currentSale.map((item, index) => `
-        <tr>
-          <td>${item.itemName}</td>
-          <td>${item.quantity}</td>
-          <td><input type="number" class="editable-unit-price" value="${item.unitPrice.toFixed(2)}" onchange="updateUnitPrice(${index}, this.value)"></td>
-          <td>${item.total.toFixed(2)}</td>
-          <td><button onclick="removeItem(${index})" class="text-red-500 hover:text-red-700"><i class="fas fa-trash"></i></button></td>
-        </tr>
-      `).join('');
-
-      // Update Total
-      const total = currentSale.reduce((sum, item) => sum + item.total, 0);
-      document.getElementById('saleTotal').textContent = total.toFixed(2);
-    }
-
-    // Update Unit Price
-    function updateUnitPrice(index, newPrice) {
-      const item = currentSale[index];
-      item.unitPrice = parseFloat(newPrice);
-      item.total = item.unitPrice * item.quantity;
-      updateSaleTable();
-    }
-
-    // Remove Item from Sale
-    function removeItem(index) {
-      currentSale.splice(index, 1);
-      updateSaleTable();
-    }
-
-    // Open Add Client Modal
-    function openAddClientModal() {
-      document.getElementById('addClientModal').classList.remove('hidden');
-    }
-
-    // Add Client
-    document.getElementById('addClientForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const clientName = document.querySelector('#addClientForm input[type="text"]').value;
-      const clientEmail = document.querySelector('#addClientForm input[type="text"]').value;
-      const clientPhone = document.querySelector('#addClientForm input[type="text"]').value;
-
-      // Send data to the backend
-      const response = await fetch(`${backendUrl}/clients/`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          name: clientName,
-          email: clientEmail,
-          phone: clientPhone,
-        }),
-      });
-
-      if (response.ok) {
-        alert('Client added successfully!');
-        e.target.reset();
-        closeModal('addClientModal');
-      } else {
-        alert('Failed to add client.');
-      }
-    });
-
-    // Open Choose Client Modal
-    async function openChooseClientModal() {
-      // Fetch clients from the backend
-      const response = await fetch(`${backendUrl}/clients/`);
-      const data = await response.json();
-      clients = data.clients;
-
-      // Populate the client list
-      const clientList = document.getElementById('clientList');
-      clientList.innerHTML = clients.map(client => `
-        <div class="flex justify-between items-center p-2 border-b dark:border-gray-700">
-          <span>${client.name}</span>
-          <button onclick="selectClient('${client.name}')" class="gray-button">Select</button>
-        </div>
-      `).join('');
-
-      // Show the modal
-      document.getElementById('chooseClientModal').classList.remove('hidden');
-    }
-
-    // Select Client
-    function selectClient(clientName) {
-      selectedClient = clients.find(client => client.name === clientName);
-      closeModal('chooseClientModal');
-    }
-
-    // Close Modal
-    function closeModal(modalId) {
-      document.getElementById(modalId).classList.add('hidden');
-    }
-
-    // Generate Receipt
-    async function generateReceipt() {
-      if (currentSale.length === 0) {
-        alert('No items in the sale!');
-        return;
-      }
-
-      if (!selectedClient) {
-        alert('Please select a client before generating the receipt.');
-        return;
-      }
-
-      const total = currentSale.reduce((sum, item) => sum + item.total, 0);
-
-      // Prepare the sale data
-      const saleData = {
-        client_name: selectedClient.name,
-        items: currentSale.map(item => ({
-          name: item.itemName,
-          quantity: item.quantity,
-          unit_price: item.unitPrice,
-          total: item.total,
-        })),
-        total_amount: total,
-      };
-
-      // Send the sale data to the backend
-      try {
-        const response = await fetch(`${backendUrl}/sales/`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(saleData),
-        });
-
-        if (response.ok) {
-          alert('Sale created and bank account updated successfully!');
-
-          // Generate the receipt PDF
-          const doc = new jsPDF();
-          doc.text('Receipt', 10, 10);
-          doc.text(`Client: ${selectedClient.name}`, 10, 20);
-          doc.text('Items:', 10, 30);
-          currentSale.forEach((item, index) => {
-            doc.text(`${item.itemName} - ${item.quantity} x ${item.unitPrice.toFixed(2)} = ${item.total.toFixed(2)}`, 10, 40 + (index * 10));
-          });
-          doc.text(`Total: ${total.toFixed(2)}`, 10, 40 + (currentSale.length * 10));
-          doc.save('receipt.pdf');
-
-          // Clear the current sale
-          currentSale = [];
-          updateSaleTable();
-          fetchSalesHistory(); // Refresh sales history
-        } else {
-          alert('Failed to create sale.');
-        }
-      } catch (error) {
-        console.error('Error creating sale:', error);
-        alert('Failed to create sale.');
-      }
-    }
-
-    // Fetch Sales History
-    async function fetchSalesHistory() {
-      try {
-        const response = await fetch(`${backendUrl}/sales/`);
-        const data = await response.json();
-        salesHistory = data.sales;
-        updateSalesHistory();
-      } catch (error) {
-        console.error('Error fetching sales history:', error);
-      }
-    }
-
-    // Update Sales History Table
-    function updateSalesHistory() {
-      const salesHistoryBody = document.getElementById('salesHistoryBody');
-      salesHistoryBody.innerHTML = salesHistory.map(sale => `
-        <tr>
-          <td>${new Date(sale.created_at).toLocaleDateString()}</td>
-          <td>${sale.client_name}</td>
-          <td>
-            <ul>
-              ${sale.items.map(item => `
-                <li>${item.name} - ${item.quantity} x ${item.unit_price.toFixed(2)} = ${item.total.toFixed(2)}</li>
-              `).join('')}
-            </ul>
-          </td>
-          <td>${sale.total_amount.toFixed(2)}</td>
-          <td>
-            <button onclick="editSale('${sale.id}')" class="text-blue-500 hover:text-blue-700"><i class="fas fa-edit"></i></button>
-            <button onclick="deleteSale('${sale.id}')" class="text-red-500 hover:text-red-700"><i class="fas fa-trash"></i></button>
-          </td>
-        </tr>
-      `).join('');
-    }
-
-    // Initialize
-    fetchProducts();
-    fetchStock();
-    fetchSalesHistory();
-  </script>
-</body>
-</html>
-
-dashboard,
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1393,8 +246,7 @@ dashboard,
     </div>
     <div class="action-item">
       <i class="fas fa-money-check-alt"></i>
-      <span class="default-text">Daily Expenses</span>
-      <span class="hover-text">Daily Expenses</span>
+      <a href="expenses.html">Daily Expenses</a>
     </div>
     <div class="action-item">
       <i class="fas fa-money-check-alt"></i>
@@ -2237,4 +1089,780 @@ async function updateTotalInvested() {
     
   </script>
 </body>
-</html>
+</html>,
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import os
+import psycopg2
+import logging
+import json
+from typing import List, Optional
+from datetime import datetime
+
+app = FastAPI()
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+# CORS configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Database connection
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://itech_l1q2_user:AoqQkrtzrQW7WEDOJdh0C6hhlY5Xe3sv@dpg-cuvnsbggph6c73ev87g0-a/itech_l1q2")
+
+def get_db():
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn
+
+# Pydantic models
+class Product(BaseModel):
+    name: str
+    type: str
+    buying_price: float
+    selling_price: float
+
+class Service(BaseModel):
+    name: str
+    description: str
+    price: float
+
+class Stock(BaseModel):
+    product_name: str
+    product_type: str
+    quantity: int
+    price_per_unit: float
+
+class BankAccountUpdate(BaseModel):
+    balance: float
+    purpose: str
+
+class Client(BaseModel):
+    name: str
+    email: str
+    phone: str
+
+class Asset(BaseModel):
+    name: str
+    type: str
+    cost_price: float
+    current_value: float
+    quantity: int
+
+class SaleItem(BaseModel):
+    name: str
+    quantity: int
+    unit_price: float
+    total: float
+
+class Sale(BaseModel):
+    client_name: str
+    items: List[SaleItem]
+    total_amount: float
+    
+class Expense(BaseModel):
+    date: str
+    person: str
+    description: str
+    cost: float
+    quantity: int    
+    
+# Initialize database tables
+def init_db():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        # Drop and recreate tables to ensure the correct schema
+        cursor.execute('DROP TABLE IF EXISTS bank_account;')
+        cursor.execute('DROP TABLE IF EXISTS sales;')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS products (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL,
+                buying_price REAL NOT NULL,
+                selling_price REAL NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS services (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                price REAL NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS stock (
+                id SERIAL PRIMARY KEY,
+                product_name TEXT NOT NULL,
+                product_type TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                price_per_unit REAL NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bank_account (
+                id SERIAL PRIMARY KEY,
+                balance REAL NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS clients (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                phone TEXT NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS assets (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL,
+                cost_price REAL NOT NULL,
+                current_value REAL NOT NULL,
+                quantity INTEGER NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sales (
+                id SERIAL PRIMARY KEY,
+                client_name TEXT NOT NULL,
+                items JSONB NOT NULL,
+                total_amount REAL NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('DROP TABLE IF EXISTS expenses;')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS expenses (
+                id SERIAL PRIMARY KEY,
+                date DATE NOT NULL,
+                person TEXT NOT NULL,
+                description TEXT NOT NULL,
+                cost REAL NOT NULL,
+                quantity INTEGER NOT NULL,
+                total REAL NOT NULL
+            )
+        ''')
+        # Initialize the balance to 0 if the table is empty
+        cursor.execute('SELECT COUNT(*) FROM bank_account')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('INSERT INTO bank_account (balance) VALUES (0)')
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+# Initialize database
+init_db()
+
+# Product endpoints
+@app.post("/products/")
+def add_product(product: Product):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        logger.debug(f"Adding product: {product}")
+        cursor.execute('''
+            INSERT INTO products (name, type, buying_price, selling_price)
+            VALUES (%s, %s, %s, %s)
+        ''', (
+            product.name, product.type, product.buying_price, product.selling_price
+        ))
+        conn.commit()
+        return {"message": "Product added successfully"}
+    except Exception as e:
+        logger.error(f"Error adding product: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to add product: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/products/")
+def get_products():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM products')
+        products = cursor.fetchall()
+        return {"products": [dict(zip([col[0] for col in cursor.description], row)) for row in products]}
+    except Exception as e:
+        logger.error(f"Error fetching products: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch products")
+    finally:
+        if conn:
+            conn.close()
+
+@app.delete("/products/{product_name}/{product_type}")
+def delete_product(product_name: str, product_type: str):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM products WHERE name = %s AND type = %s', (product_name, product_type))
+        product = cursor.fetchone()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        cursor.execute('DELETE FROM products WHERE name = %s AND type = %s', (product_name, product_type))
+        conn.commit()
+        return {"message": "Product deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting product: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete product")
+    finally:
+        if conn:
+            conn.close()
+
+# Stock endpoints
+@app.get("/total_stock/")
+def get_total_stock():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT SUM(quantity * price_per_unit) FROM stock')
+        total_stock = cursor.fetchone()[0] or 0
+        return {"total_stock": total_stock}
+    except Exception as e:
+        logger.error(f"Error calculating total stock: {e}")
+        raise HTTPException(status_code=500, detail="Failed to calculate total stock")
+    finally:
+        if conn:
+            conn.close()
+
+@app.post("/stock/")
+def add_stock(stock: Stock):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO stock (product_name, product_type, quantity, price_per_unit)
+            VALUES (%s, %s, %s, %s)
+        ''', (
+            stock.product_name, stock.product_type, stock.quantity, stock.price_per_unit
+        ))
+        conn.commit()
+        return {"message": "Stock added successfully"}
+    except Exception as e:
+        logger.error(f"Error adding stock: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to add stock: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/stock/")
+def get_stock():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM stock')
+        stock = cursor.fetchall()
+        return {"stock": [dict(zip([col[0] for col in cursor.description], row)) for row in stock]}
+    except Exception as e:
+        logger.error(f"Error fetching stock: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch stock")
+    finally:
+        if conn:
+            conn.close()
+
+@app.delete("/stock/{product_name}/{product_type}")
+def delete_stock(product_name: str, product_type: str):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM stock WHERE product_name = %s AND product_type = %s', (product_name, product_type))
+        stock_item = cursor.fetchone()
+        if not stock_item:
+            raise HTTPException(status_code=404, detail="Stock item not found")
+
+        cursor.execute('DELETE FROM stock WHERE product_name = %s AND product_type = %s', (product_name, product_type))
+        conn.commit()
+        return {"message": "Stock item deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting stock item: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete stock item")
+    finally:
+        if conn:
+            conn.close()
+
+# Service endpoints
+@app.post("/services/")
+def add_service(service: Service):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO services (name, description, price)
+            VALUES (%s, %s, %s)
+        ''', (service.name, service.description, service.price))
+        conn.commit()
+        return {"message": "Service added successfully"}
+    except Exception as e:
+        logger.error(f"Error adding service: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail="Failed to add service")
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/services/")
+def get_services():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM services')
+        services = cursor.fetchall()
+        return {"services": [dict(zip([col[0] for col in cursor.description], row)) for row in services]}
+    except Exception as e:
+        logger.error(f"Error fetching services: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch services")
+    finally:
+        if conn:
+            conn.close()
+
+@app.delete("/services/{service_name}")
+def delete_service(service_name: str):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM services WHERE name = %s', (service_name,))
+        service = cursor.fetchone()
+        if not service:
+            raise HTTPException(status_code=404, detail="Service not found")
+
+        cursor.execute('DELETE FROM services WHERE name = %s', (service_name,))
+        conn.commit()
+        return {"message": "Service deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting service: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete service")
+    finally:
+        if conn:
+            conn.close()
+
+# Bank Account endpoints
+@app.get("/bank_account/")
+def get_bank_account():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT balance FROM bank_account WHERE id = 1')
+        balance = cursor.fetchone()[0]
+        return {"balance": balance}
+    except Exception as e:
+        logger.error(f"Error fetching bank account balance: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch bank account balance")
+    finally:
+        if conn:
+            conn.close()
+
+@app.post("/bank_account/")
+def update_bank_account(bank_account: BankAccountUpdate):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT balance FROM bank_account WHERE id = 1')
+        current_balance = cursor.fetchone()[0]
+        new_balance = current_balance + bank_account.balance
+        cursor.execute('UPDATE bank_account SET balance = %s WHERE id = 1', (new_balance,))
+        conn.commit()
+        return {"message": "Bank account balance updated successfully"}
+    except Exception as e:
+        logger.error(f"Error updating bank account balance: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail="Failed to update bank account balance")
+    finally:
+        if conn:
+            conn.close()
+
+# Client endpoints
+@app.post("/clients/")
+def add_client(client: Client):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO clients (name, email, phone)
+            VALUES (%s, %s, %s)
+        ''', (client.name, client.email, client.phone))
+        conn.commit()
+        return {"message": "Client added successfully"}
+    except Exception as e:
+        logger.error(f"Error adding client: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail="Failed to add client")
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/clients/")
+def get_clients():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM clients')
+        clients = cursor.fetchall()
+        return {"clients": [dict(zip([col[0] for col in cursor.description], row)) for row in clients]}
+    except Exception as e:
+        logger.error(f"Error fetching clients: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch clients")
+    finally:
+        if conn:
+            conn.close()
+
+@app.delete("/clients/{client_name}")
+def delete_client(client_name: str):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM clients WHERE name = %s', (client_name,))
+        client = cursor.fetchone()
+        if not client:
+            raise HTTPException(status_code=404, detail="Client not found")
+
+        cursor.execute('DELETE FROM clients WHERE name = %s', (client_name,))
+        conn.commit()
+        return {"message": "Client deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting client: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete client")
+    finally:
+        if conn:
+            conn.close()
+
+# Asset endpoints
+@app.post("/assets/")
+def add_asset(asset: Asset):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO assets (name, type, cost_price, current_value, quantity)
+            VALUES (%s, %s, %s, %s, %s)
+        ''', (asset.name, asset.type, asset.cost_price, asset.current_value, asset.quantity))
+        conn.commit()
+        return {"message": "Asset added successfully"}
+    except Exception as e:
+        logger.error(f"Error adding asset: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to add asset: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/assets/")
+def get_assets():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM assets')
+        assets = cursor.fetchall()
+        return {"assets": [dict(zip([col[0] for col in cursor.description], row)) for row in assets]}
+    except Exception as e:
+        logger.error(f"Error fetching assets: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch assets")
+    finally:
+        if conn:
+            conn.close()
+
+@app.delete("/assets/{asset_id}")
+def delete_asset(asset_id: int):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM assets WHERE id = %s', (asset_id,))
+        asset = cursor.fetchone()
+        if not asset:
+            raise HTTPException(status_code=404, detail="Asset not found")
+
+        cursor.execute('DELETE FROM assets WHERE id = %s', (asset_id,))
+        conn.commit()
+        return {"message": "Asset deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting asset: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete asset")
+    finally:
+        if conn:
+            conn.close()
+
+# Total Investment endpoint
+@app.get("/total_investment/")
+def get_total_investment():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+
+        # Get total investment from assets
+        cursor.execute('SELECT SUM(cost_price * quantity) FROM assets')
+        total_assets = cursor.fetchone()[0] or 0
+
+        # Get bank account balance
+        cursor.execute('SELECT balance FROM bank_account WHERE id = 1')
+        bank_balance = cursor.fetchone()[0] or 0
+
+        # Get total amount in stock
+        cursor.execute('SELECT SUM(quantity * price_per_unit) FROM stock')
+        total_stock = cursor.fetchone()[0] or 0
+
+        # Calculate total investment
+        total_investment = total_assets + bank_balance + total_stock
+
+        return {"total_investment": total_investment}
+    except Exception as e:
+        logger.error(f"Error calculating total investment: {e}")
+        raise HTTPException(status_code=500, detail="Failed to calculate total investment")
+    finally:
+        if conn:
+            conn.close()
+
+# Sales endpoints
+@app.post("/sales/")
+def create_sale(sale: Sale):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+
+        # Insert the sale into the database
+        cursor.execute('''
+            INSERT INTO sales (client_name, items, total_amount)
+            VALUES (%s, %s, %s)
+        ''', (sale.client_name, json.dumps([item.dict() for item in sale.items]), sale.total_amount))
+
+        # Update the bank account balance
+        cursor.execute('SELECT balance FROM bank_account WHERE id = 1')
+        current_balance = cursor.fetchone()[0]
+        new_balance = current_balance + sale.total_amount
+        cursor.execute('UPDATE bank_account SET balance = %s WHERE id = 1', (new_balance,))
+
+        conn.commit()
+        return {"message": "Sale created and bank account updated successfully"}
+    except Exception as e:
+        logger.error(f"Error creating sale: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to create sale: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/sales/")
+def get_sales():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM sales ORDER BY created_at DESC')
+        sales = cursor.fetchall()
+        return {"sales": [dict(zip([col[0] for col in cursor.description], row)) for row in sales]}
+    except Exception as e:
+        logger.error(f"Error fetching sales: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch sales")
+    finally:
+        if conn:
+            conn.close()
+@app.get("/sales/{sale_id}")
+def get_sale(sale_id: int):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM sales WHERE id = %s', (sale_id,))
+        sale = cursor.fetchone()
+        if not sale:
+            raise HTTPException(status_code=404, detail="Sale not found")
+        return {"sale": dict(zip([col[0] for col in cursor.description], sale))}
+    except Exception as e:
+        logger.error(f"Error fetching sale: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch sale")
+    finally:
+        if conn:
+            conn.close()
+@app.delete("/sales/{sale_id}")
+def delete_sale(sale_id: int):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM sales WHERE id = %s', (sale_id,))
+        sale = cursor.fetchone()
+        if not sale:
+            raise HTTPException(status_code=404, detail="Sale not found")
+
+        cursor.execute('DELETE FROM sales WHERE id = %s', (sale_id,))
+        conn.commit()
+        return {"message": "Sale deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting sale: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete sale")
+    finally:
+        if conn:
+            conn.close()    
+# Expense endpoints
+@app.post("/expenses/")
+def add_expense(expense: Expense):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        total = expense.cost * expense.quantity
+
+        # Insert the expense into the database
+        cursor.execute('''
+            INSERT INTO expenses (date, person, description, cost, quantity, total)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        ''', (
+            expense.date, expense.person, expense.description, expense.cost, expense.quantity, total
+        ))
+
+        # Update the bank account balance
+        cursor.execute('SELECT balance FROM bank_account WHERE id = 1')
+        current_balance = cursor.fetchone()[0]
+        new_balance = current_balance - total
+        cursor.execute('UPDATE bank_account SET balance = %s WHERE id = 1', (new_balance,))
+
+        conn.commit()
+        return {"message": "Expense added and balance updated successfully"}
+    except Exception as e:
+        logger.error(f"Error adding expense: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to add expense: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/expenses/")
+def get_expenses():
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM expenses ORDER BY date DESC')
+        expenses = cursor.fetchall()
+        return {"expenses": [dict(zip([col[0] for col in cursor.description], row)) for row in expenses]}
+    except Exception as e:
+        logger.error(f"Error fetching expenses: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch expenses")
+    finally:
+        if conn:
+            conn.close()
+
+@app.delete("/expenses/{expense_id}")
+def delete_expense(expense_id: int):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM expenses WHERE id = %s', (expense_id,))
+        expense = cursor.fetchone()
+        if not expense:
+            raise HTTPException(status_code=404, detail="Expense not found")
+
+        # Restore the balance
+        cursor.execute('SELECT balance FROM bank_account WHERE id = 1')
+        current_balance = cursor.fetchone()[0]
+        new_balance = current_balance + expense[5]  # expense[5] is the total
+        cursor.execute('UPDATE bank_account SET balance = %s WHERE id = 1', (new_balance,))
+
+        # Delete the expense
+        cursor.execute('DELETE FROM expenses WHERE id = %s', (expense_id,))
+        conn.commit()
+        return {"message": "Expense deleted and balance restored successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting expense: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete expense")
+    finally:
+        if conn:
+            conn.close()            
+            
+@app.put("/stock/{product_name}/{product_type}/add_quantity")
+def add_stock_quantity(product_name: str, product_type: str, quantity: int):
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+
+        # Fetch the current stock item
+        cursor.execute('SELECT * FROM stock WHERE product_name = %s AND product_type = %s', (product_name, product_type))
+        stock_item = cursor.fetchone()
+        if not stock_item:
+            raise HTTPException(status_code=404, detail="Stock item not found")
+
+        # Calculate the new quantity
+        new_quantity = stock_item[3] + quantity
+
+        # Update the stock quantity in the database
+        cursor.execute('UPDATE stock SET quantity = %s WHERE product_name = %s AND product_type = %s', (new_quantity, product_name, product_type))
+        conn.commit()
+
+        return {"message": "Stock quantity updated successfully"}
+    except Exception as e:
+        logger.error(f"Error updating stock quantity: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail="Failed to update stock quantity")
+    finally:
+        if conn:
+            conn.close()
+# Run the application
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
